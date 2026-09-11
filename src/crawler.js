@@ -2,7 +2,7 @@
 import fs from "fs";
 import path from "path";
 import axios from "axios";
-import cheerio from "cheerio";
+import * as cheerio from "cheerio";
 import { createObjectCsvWriter } from "csv-writer";
 import PQueue from "p-queue";
 import { DEFAULT_CONFIG } from "./config.js";
