@@ -417,7 +417,8 @@ export class Crawler {
 
   isSourceLikelyTelegramDirectory(url) {
     const low = String(url).toLowerCase();
-    const dirIndicators = ["telegramchannels", "telegramgroup", "tgstat", "telegramic", "lista", "canais", "grupos", "telegramchannels.me", "tlgrm"];n    for (const d of dirIndicators) if (low.includes(d)) return true;
+    const dirIndicators = ["telegramchannels", "telegramgroup", "tgstat", "telegramic", "lista", "canais", "grupos", "telegramchannels.me", "tlgrm"];
+    for (const d of dirIndicators) if (low.includes(d)) return true;
     return false;
   }
 
