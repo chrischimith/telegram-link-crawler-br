@@ -5,7 +5,6 @@ import yargs from "yargs/yargs";
 import { hideBin } from "yargs/helpers";
 import { Crawler } from "./crawler.js";
 import { DEFAULT_CONFIG } from "./config.js";
-import { STATES, CITIES, PARTIES } from "./data/places.js";
 
 function loadLines(filePath) {
   try {
@@ -20,49 +19,42 @@ function loadLines(filePath) {
   }
 }
 
-function generateBaseQueries(extra = []) {
-  const categories = [
-    "canal Telegram política", "grupo Telegram política", "canal Telegram eleições", "grupo Telegram eleições",
-    "canal Telegram partidos", "grupo Telegram partidos", "canal Telegram governo", "grupo Telegram governo",
-    "canal Telegram Congresso", "canal Telegram Senado", "canal Telegram STF", "canal Telegram TSE",
-    "canal Telegram notícias políticas", "grupo Telegram notícias políticas", "canal Telegram opinião política",
-    "lista canais telegram política", "lista grupos telegram política", "diretório telegram canais políticos",
-    "telegram canais política Brasil", "telegram grupos política Brasil"
+/**
+ * Queries iniciais otimizadas: poucos termos, alta relevância
+ * Expansão será feita dinamicamente baseada em resultados
+ */
+function getInitialQueries(extra = []) {
+  const base = [
+    // Política Nacional
+    "site:t.me política Brasil Telegram",
+    "site:t.me política brasileira Telegram",
+    "site:t.me eleições Brasil Telegram",
+    "site:t.me notícias políticas Brasil Telegram",
+    "site:t.me governo Brasil Telegram",
+    
+    // Instituições
+    "site:t.me Congresso Brasil Telegram",
+    "site:t.me Senado Brasil Telegram",
+    "site:t.me STF Brasil Telegram",
+    "site:t.me TSE Brasil Telegram",
+    
+    // Ideologia
+    "site:t.me partidos políticos Brasil Telegram",
+    "site:t.me deputados Brasil Telegram",
+    "site:t.me senadores Brasil Telegram",
+    
+    // Personalidades
+    "site:t.me Bolsonaro Telegram",
+    "site:t.me Lula Telegram",
+    
+    // Espectro político
+    "site:t.me direita Brasil Telegram",
+    "site:t.me esquerda Brasil Telegram"
   ];
-  const queries = new Set();
-  for (const c of categories) queries.add(c);
-  for (const state of STATES) {
-    for (const base of ["canal Telegram política", "grupo Telegram política", "Telegram política"]) {
-      queries.add(`${base} ${state}`);
-      queries.add(`${base} ${state} Brasil`);
-    }
-    for (const party of PARTIES) {
-      queries.add(`${party} canal Telegram`);
-      queries.add(`${party} grupo Telegram`);
-    }
-  }
-  for (const city of CITIES) {
-    for (const base of ["canal Telegram política", "grupo Telegram política", "Telegram política"]) {
-      queries.add(`${base} ${city}`);
-    }
-  }
+
+  const queries = new Set(base);
   extra.forEach((e) => queries.add(e));
   return Array.from(queries);
-}
-
-function generateSiteTelegramQueries() {
-  const bases = ["política", "eleições", "Brasil", "Bolsonaro", "Lula", "Congresso", "Senado", "STF", "TSE"];
-  const queries = [];
-  for (const b of bases) {
-    queries.push(`site:t.me "${b}"`);
-    for (const s of STATES) {
-      queries.push(`site:t.me "${b}" ${s}`);
-    }
-    for (const c of CITIES.slice(0,10)) {
-      queries.push(`site:t.me "${b}" ${c}`);
-    }
-  }
-  return queries;
 }
 
 async function main() {
@@ -75,14 +67,12 @@ async function main() {
     .option("concurrency", { type: "number", default: DEFAULT_CONFIG.CONCURRENCY })
     .option("output", { type: "string", default: DEFAULT_CONFIG.OUTPUT_CSV })
     .option("output-json", { type: "string", default: DEFAULT_CONFIG.OUTPUT_JSON })
-    .option("site-tme", { type: "boolean", default: true, description: "Habilita buscas site:t.me diretas" })
     .help()
     .argv;
 
   const extras = loadLines(argv["queries-file"]);
   const seeds = loadLines(argv["sources-file"]);
-  const baseQueries = generateBaseQueries(extras);
-  const siteQueries = argv["site-tme"] ? generateSiteTelegramQueries() : [];
+  const initialQueries = getInitialQueries(extras);
 
   const options = {
     ...DEFAULT_CONFIG,
@@ -96,37 +86,48 @@ async function main() {
 
   fs.mkdirSync(path.dirname(options.OUTPUT_CSV), { recursive: true });
 
-  console.log("Iniciando crawler com:");
-  console.log("MAX_RESULTS:", options.MAX_RESULTS);
-  console.log("MAX_DEPTH:", options.MAX_DEPTH);
-  console.log("REQUEST_DELAY:", options.REQUEST_DELAY);
-  console.log("CONCURRENCY:", options.CONCURRENCY);
-  console.log("Queries base:", baseQueries.length);
-  console.log("Site:t.me queries:", siteQueries.length);
-  console.log("Seeds fornecidas:", seeds.length);
+  console.log("\n╔════════════════════════════════════════════════════════════════╗");
+  console.log("║  TELEGRAM LINK CRAWLER - POLÍTICA BRASIL (v2 - DINÂMICO)     ║");
+  console.log("╚════════════════════════════════════════════════════════════════╝\n");
+  console.log("Configuração:");
+  console.log("  MAX_RESULTS:", options.MAX_RESULTS);
+  console.log("  MAX_DEPTH:", options.MAX_DEPTH);
+  console.log("  REQUEST_DELAY:", options.REQUEST_DELAY, "ms");
+  console.log("  CONCURRENCY:", options.CONCURRENCY);
+  console.log("  Queries iniciais:", initialQueries.length);
+  console.log("  Seeds URL:", seeds.length);
+  console.log("\nEstrutura de Discovery:");
+  console.log("  • Queries Iniciais → Busca Bing");
+  console.log("  • Resultados → Análise + Geração de Novas Queries");
+  console.log("  • Expansão Dinâmica até MAX_RESULTS");
+  console.log("  • Parada Automática ao Atingir Limite\n");
 
   const crawler = new Crawler(options);
 
   const initialSeeds = seeds.slice(0, 100);
-  const includeSiteTelegram = !!argv["site-tme"];
 
-  // merge queries, avoid duplicating site:t.me prefix (seedFromSearchQueries now checks)
-  const mergedQueries = baseQueries.concat(siteQueries);
+  const stats = await crawler.run(initialQueries, initialSeeds);
 
-  const stats = await crawler.run(mergedQueries, initialSeeds, includeSiteTelegram);
-
-  console.log("---- RESULTADO ----");
-  console.log(`Páginas visitadas: ${stats.pagesVisited}`);
-  console.log(`Páginas com links Telegram: ${stats.pagesWithTelegramLinks}`);
-  console.log(`Links Telegram encontrados (raw): ${stats.telegramLinksFound}`);
-  console.log(`Resultados únicos: ${stats.resultsUnique}`);
-  console.log(`Resultados com nome: ${stats.resultsWithName}`);
-  console.log(`Resultados com descrição: ${stats.resultsWithDescription}`);
-  console.log(`Resultados classificados: ${stats.resultsClassified}`);
-  console.log(`Tempo total (s): ${stats.totalTimeSeconds.toFixed(1)}`);
-  console.log(`CSV: ${options.OUTPUT_CSV}`);
-  console.log(`JSON: ${options.OUTPUT_JSON}`);
-  console.log(`STATE: ${options.STATE_FILE || 'output/state.json'}`);
+  console.log("\n╔════════════════════════════════════════════════════════════════╗");
+  console.log("║                    RESULTADO FINAL                            ║");
+  console.log("╚════════════════════════════════════════════════════════════════╝\n");
+  console.log("Busca:");
+  console.log(`  Queries executadas: ${stats.queriesExecuted}`);
+  console.log(`  Queries geradas (dinâmicas): ${stats.queriesGenerated}`);
+  console.log("\nCrawling:");
+  console.log(`  Páginas visitadas: ${stats.pagesVisited}`);
+  console.log(`  Páginas com links Telegram: ${stats.pagesWithTelegramLinks}`);
+  console.log(`  Links Telegram encontrados (raw): ${stats.telegramLinksFound}`);
+  console.log("\nResultados:");
+  console.log(`  Resultados únicos: ${stats.resultsUnique} / ${options.MAX_RESULTS}`);
+  console.log(`  Com nome: ${stats.resultsWithName}`);
+  console.log(`  Com descrição: ${stats.resultsWithDescription}`);
+  console.log(`  Classificados: ${stats.resultsClassified}`);
+  console.log("\nPerformance:");
+  console.log(`  Tempo total: ${stats.totalTimeSeconds.toFixed(1)}s`);
+  console.log(`  CSV: ${options.OUTPUT_CSV}`);
+  console.log(`  JSON: ${options.OUTPUT_JSON}`);
+  console.log(`  STATE: output/state.json\n`);
 }
 
 if (import.meta.url === `file://${process.argv[1]}` || process.argv[1].endsWith("index.js")) {
