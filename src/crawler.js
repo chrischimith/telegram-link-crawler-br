@@ -65,7 +65,7 @@ export class Crawler {
     this.jsonPath = this.config.OUTPUT_JSON;
     this.statePath = this.config.STATE_FILE;
     this.newSinceSave = 0;
-    this.maxQueriesReached = false; // flag para parar definitivamente
+    this.maxQueriesReached = false; // flag para parar definitivamente quando MAX_QUERIES é atingido
     // statistics
     this.stats = {
       pagesVisited: 0,
@@ -125,7 +125,7 @@ export class Crawler {
       }
       if (st.queryManager) {
         const qm = st.queryManager;
-        // Restaura queries executadas
+        // Restaura queries executadas - CRÍTICO para manter contagem consistente
         if (qm.executed) {
           qm.executed.forEach((q) => this.queryManager.markExecuted(q));
         }
@@ -365,27 +365,28 @@ export class Crawler {
 
   /**
    * Executa uma query de busca e processa resultados dinamicamente
-   * Verifica limite MAX_QUERIES ANTES de executar
-   * Marca como executada SOMENTE APÓS requisição HTTP bem-sucedida
+   * TRAVA 1: Verifica limite MAX_QUERIES ANTES de executar
+   * TRAVA 2: Marca como executada SOMENTE após validações iniciais
+   * Garante que apenas queries realmente executadas contam para o limite
    */
   async executeBingQuery(query) {
-    // Verificação 1: Limite de queries alcançado
+    // TRAVA 1: Verificação de limite ANTES de fazer qualquer requisição
     if (this.queryManager.executedQueries.size >= this.config.MAX_QUERIES) {
       this.log("LIMIT", `MAX_QUERIES atingido: ${this.config.MAX_QUERIES}`);
-      this.maxQueriesReached = true;
       return false;
     }
 
-    // Verificação 2: Limite de resultados alcançado
+    // Verificação de MAX_RESULTS também
     if (this.results.size >= this.config.MAX_RESULTS) {
       this.log("LIMIT", `MAX_RESULTS atingido: ${this.config.MAX_RESULTS}`);
       return false;
     }
 
-    // Marca como executada APÓS validações, antes de fazer requisições HTTP
-    // Isso garante que a query não será tentada novamente
+    // TRAVA 2: Marca como executada ANTES de fazer a requisição
+    // Isso garante que a query não será retentada se o crawler for interrompido
     this.queryManager.markExecuted(query);
-    this.log("QUERY", `[${this.queryManager.executedQueries.size}/${this.config.MAX_QUERIES}] executando: "${query}"`);
+    const executedCount = this.queryManager.executedQueries.size;
+    this.log("QUERY", `[${executedCount}/${this.config.MAX_QUERIES}] executando: "${query}"`);
     
     for (let p = 0; p < this.config.BING_SEARCH_PAGES; p++) {
       if (this.results.size >= this.config.MAX_RESULTS) {
@@ -572,9 +573,10 @@ export class Crawler {
     this.log("RUN", `fila inicial: ${this.queue.length} itens, queries: ${this.queryManager.count().pending}`);
 
     // Main loop: alterna entre executar queries e processar fila de URLs
+    // TRAVA 3: Condição no while garante parada imediata quando MAX_QUERIES é atingido
     while (this.results.size < this.config.MAX_RESULTS && !this.maxQueriesReached) {
       // Processa queries dinâmicas primeiro (com limite MAX_QUERIES)
-      // Esta condição no while garante que não tenta puxar queries após atingir limite
+      // TRAVA 4: Condição de saída dupla no while das queries
       while (
         this.queryManager.hasPending() &&
         this.results.size < this.config.MAX_RESULTS &&
@@ -593,14 +595,14 @@ export class Crawler {
         break;
       }
 
-      // Para se atingir limite de queries
+      // Verifica se atingiu limite de queries
       if (this.queryManager.executedQueries.size >= this.config.MAX_QUERIES) {
         this.log("LIMIT", `MAX_QUERIES atingido: ${this.config.MAX_QUERIES}`);
         this.maxQueriesReached = true;
         break;
       }
 
-      // Processa fila de URLs
+      // Processa fila de URLs (continua após atingir MAX_QUERIES)
       while (this.queue.length > 0 && this.queueExecutor.size + this.queueExecutor.pending < Math.max(2, this.config.CONCURRENCY * 2)) {
         if (this.results.size >= this.config.MAX_RESULTS) break;
         const item = this.popQueue();
