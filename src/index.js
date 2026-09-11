@@ -62,6 +62,7 @@ async function main() {
     .option("queries-file", { alias: "q", type: "string" })
     .option("sources-file", { alias: "s", type: "string" })
     .option("max-results", { alias: "m", type: "number", default: DEFAULT_CONFIG.MAX_RESULTS })
+    .option("max-queries", { type: "number", default: DEFAULT_CONFIG.MAX_QUERIES })
     .option("max-depth", { type: "number", default: DEFAULT_CONFIG.MAX_DEPTH })
     .option("request-delay", { type: "number", default: DEFAULT_CONFIG.REQUEST_DELAY })
     .option("concurrency", { type: "number", default: DEFAULT_CONFIG.CONCURRENCY })
@@ -77,6 +78,7 @@ async function main() {
   const options = {
     ...DEFAULT_CONFIG,
     MAX_RESULTS: argv["max-results"],
+    MAX_QUERIES: argv["max-queries"],
     MAX_DEPTH: argv["max-depth"],
     REQUEST_DELAY: argv["request-delay"],
     CONCURRENCY: argv["concurrency"],
@@ -87,10 +89,11 @@ async function main() {
   fs.mkdirSync(path.dirname(options.OUTPUT_CSV), { recursive: true });
 
   console.log("\n╔════════════════════════════════════════════════════════════════╗");
-  console.log("║  TELEGRAM LINK CRAWLER - POLÍTICA BRASIL (v2 - DINÂMICO)     ║");
+  console.log("║  TELEGRAM LINK CRAWLER - POL��TICA BRASIL (v2 - DINÂMICO)     ║");
   console.log("╚════════════════════════════════════════════════════════════════╝\n");
   console.log("Configuração:");
   console.log("  MAX_RESULTS:", options.MAX_RESULTS);
+  console.log("  MAX_QUERIES:", options.MAX_QUERIES);
   console.log("  MAX_DEPTH:", options.MAX_DEPTH);
   console.log("  REQUEST_DELAY:", options.REQUEST_DELAY, "ms");
   console.log("  CONCURRENCY:", options.CONCURRENCY);
@@ -100,6 +103,7 @@ async function main() {
   console.log("  • Queries Iniciais → Busca Bing");
   console.log("  • Resultados → Análise + Geração de Novas Queries");
   console.log("  • Expansão Dinâmica até MAX_RESULTS");
+  console.log("  • Limite de Segurança: MAX_QUERIES");
   console.log("  • Parada Automática ao Atingir Limite\n");
 
   const crawler = new Crawler(options);
@@ -108,11 +112,11 @@ async function main() {
 
   const stats = await crawler.run(initialQueries, initialSeeds);
 
-  console.log("\n╔════════════════════════════════════════════════════════════════╗");
+  console.log("\n╔══════════════════════════════════════════════���═════════════════╗");
   console.log("║                    RESULTADO FINAL                            ║");
   console.log("╚════════════════════════════════════════════════════════════════╝\n");
   console.log("Busca:");
-  console.log(`  Queries executadas: ${stats.queriesExecuted}`);
+  console.log(`  Queries executadas: ${stats.queriesExecuted} / ${stats.maxQueries}`);
   console.log(`  Queries geradas (dinâmicas): ${stats.queriesGenerated}`);
   console.log("\nCrawling:");
   console.log(`  Páginas visitadas: ${stats.pagesVisited}`);
