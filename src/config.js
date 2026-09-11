@@ -1,5 +1,6 @@
 export const DEFAULT_CONFIG = {
   MAX_RESULTS: 1000,
+  MAX_QUERIES: 500, // limite global de queries Bing executadas
   MAX_DEPTH: 3,
   REQUEST_DELAY: 500, // ms between requests per worker
   CONCURRENCY: 3,
