@@ -89,7 +89,7 @@ async function main() {
   fs.mkdirSync(path.dirname(options.OUTPUT_CSV), { recursive: true });
 
   console.log("\n╔════════════════════════════════════════════════════════════════╗");
-  console.log("║  TELEGRAM LINK CRAWLER - POL��TICA BRASIL (v2 - DINÂMICO)     ║");
+  console.log("║  TELEGRAM LINK CRAWLER - POLÍTICA BRASIL (v2 - DINÂMICO)     ║");
   console.log("╚════════════════════════════════════════════════════════════════╝\n");
   console.log("Configuração:");
   console.log("  MAX_RESULTS:", options.MAX_RESULTS);
@@ -112,7 +112,7 @@ async function main() {
 
   const stats = await crawler.run(initialQueries, initialSeeds);
 
-  console.log("\n╔══════════════════════════════════════════════���═════════════════╗");
+  console.log("\n╔════════════════════════════════════════════════════════════════╗");
   console.log("║                    RESULTADO FINAL                            ║");
   console.log("╚════════════════════════════════════════════════════════════════╝\n");
   console.log("Busca:");

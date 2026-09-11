@@ -357,9 +357,16 @@ export class Crawler {
   }
 
   /**
-   * NOVO: Executa uma query de busca e processa resultados dinamicamente
+   * Executa uma query de busca e processa resultados dinamicamente
+   * Verifica limite MAX_QUERIES antes de executar
    */
   async executeBingQuery(query) {
+    // Verifica limite de queries
+    if (this.queryManager.executedQueries.size >= this.config.MAX_QUERIES) {
+      this.log("LIMIT", `MAX_QUERIES atingido: ${this.config.MAX_QUERIES}`);
+      return false;
+    }
+
     if (this.results.size >= this.config.MAX_RESULTS) {
       this.log("LIMIT", `MAX_RESULTS atingido: ${this.config.MAX_RESULTS}`);
       return false;
@@ -403,7 +410,7 @@ export class Crawler {
         if (added) {
           await this.saveIfNeeded();
           
-          // NOVO: Gera novas queries a partir do resultado descoberto
+          // Gera novas queries a partir do resultado descoberto
           if (meta && (meta.nome || meta.descricao)) {
             const newQueries = this.queryManager.generateFromMetadata(
               meta.nome,
@@ -503,7 +510,7 @@ export class Crawler {
         return;
       }
 
-      // NOVO: Gera queries a partir de resultados descobertos
+      // Gera queries a partir de resultados descobertos
       if (meta && (meta.nome || meta.descricao)) {
         const newQueries = this.queryManager.generateFromMetadata(
           meta.nome,
@@ -540,7 +547,7 @@ export class Crawler {
   }
 
   async run(initialQueries = [], initialSeeds = []) {
-    // NOVO: Adiciona queries iniciais ao QueryManager
+    // Adiciona queries iniciais ao QueryManager
     const added = this.queryManager.addQueries(initialQueries);
     this.log("INIT", `${added} queries iniciais adicionadas`);
 
@@ -554,8 +561,8 @@ export class Crawler {
 
     // Main loop: alterna entre executar queries e processar fila de URLs
     while (this.results.size < this.config.MAX_RESULTS) {
-      // Processa queries dinâmicas primeiro
-      while (this.queryManager.hasPending() && this.results.size < this.config.MAX_RESULTS) {
+      // Processa queries dinâmicas primeiro (com limite MAX_QUERIES)
+      while (this.queryManager.hasPending() && this.results.size < this.config.MAX_RESULTS && this.queryManager.executedQueries.size < this.config.MAX_QUERIES) {
         const query = this.queryManager.getFirst();
         if (!query) break;
         const continueLoop = await this.executeBingQuery(query);
@@ -565,6 +572,11 @@ export class Crawler {
       if (this.results.size >= this.config.MAX_RESULTS) {
         this.log("LIMIT", `MAX_RESULTS atingido: ${this.config.MAX_RESULTS}`);
         break;
+      }
+
+      // Para se atingir limite de queries
+      if (this.queryManager.executedQueries.size >= this.config.MAX_QUERIES) {
+        this.log("LIMIT", `MAX_QUERIES atingido: ${this.config.MAX_QUERIES}`);
       }
 
       // Processa fila de URLs
@@ -582,6 +594,11 @@ export class Crawler {
       if (!this.queryManager.hasPending() && this.queue.length === 0 && this.queueExecutor.pending === 0) {
         break;
       }
+
+      // Sai do loop se atingiu limite de queries
+      if (this.queryManager.executedQueries.size >= this.config.MAX_QUERIES) {
+        break;
+      }
     }
 
     await this.queueExecutor.onIdle();
@@ -597,6 +614,7 @@ export class Crawler {
       resultsClassified: this.stats.resultsClassified,
       queriesExecuted: this.queryManager.executedQueries.size,
       queriesGenerated: this.stats.queriesGenerated,
+      maxQueries: this.config.MAX_QUERIES,
       totalTimeSeconds: totalTime
     };
   }
