@@ -7,6 +7,7 @@ import { createObjectCsvWriter } from "csv-writer";
 import PQueue from "p-queue";
 import { DEFAULT_CONFIG } from "./config.js";
 import { STATES, CITIES } from "./data/places.js";
+import { QueryManager } from "./query-manager.js";
 
 function safeSleep(ms) { return new Promise((res) => setTimeout(res, ms)); }
 
@@ -59,6 +60,7 @@ export class Crawler {
     this.queue = []; // items {url, depth, source, score}
     this.fetchCache = new Map(); // url -> html
     this.metaCache = new Map(); // username -> metadata or null
+    this.queryManager = new QueryManager(); // gerencia queries dinâmicas
     this.csvPath = this.config.OUTPUT_CSV;
     this.jsonPath = this.config.OUTPUT_JSON;
     this.statePath = this.config.STATE_FILE;
@@ -71,6 +73,7 @@ export class Crawler {
       resultsWithName: 0,
       resultsWithDescription: 0,
       resultsClassified: 0,
+      queriesGenerated: 0,
       startTime: new Date()
     };
     fs.mkdirSync(this.config.OUTPUT_DIR, { recursive: true });
@@ -119,7 +122,12 @@ export class Crawler {
       if (st.metaCache) {
         Object.entries(st.metaCache).forEach(([k, v]) => this.metaCache.set(k, v));
       }
-      this.log("STATE", "carregado", { results: this.results.size, visited: this.visited.size, queue: this.queue.length, metaCache: this.metaCache.size });
+      if (st.queryManager) {
+        const qm = st.queryManager;
+        if (qm.executed) qm.executed.forEach((q) => this.queryManager.markExecuted(q));
+        if (qm.pending) this.queryManager.addQueries(qm.pending);
+      }
+      this.log("STATE", "carregado", { results: this.results.size, visited: this.visited.size, queue: this.queue.length, metaCache: this.metaCache.size, queries: this.queryManager.count() });
     } catch (err) {
       this.log("STATE", "falha ao carregar state:", err.message);
     }
@@ -132,7 +140,11 @@ export class Crawler {
         results: Array.from(this.results.values()),
         visited: Array.from(this.visited),
         queue: this.queue.slice(0, 5000),
-        metaCache: Object.fromEntries(this.metaCache)
+        metaCache: Object.fromEntries(this.metaCache),
+        queryManager: {
+          executed: Array.from(this.queryManager.executedQueries),
+          pending: this.queryManager.getPending()
+        }
       };
       fs.writeFileSync(this.statePath, JSON.stringify(st, null, 2), "utf8");
       this.log("STATE", "state salvo");
@@ -344,75 +356,91 @@ export class Crawler {
     return true;
   }
 
-  async seedFromSearchQueries(queries, includeSiteTelegram = false) {
-    // includeSiteTelegram: if true, prefix queries without existing site: with site:t.me
-    for (const qOrig of queries) {
+  /**
+   * NOVO: Executa uma query de busca e processa resultados dinamicamente
+   */
+  async executeBingQuery(query) {
+    if (this.results.size >= this.config.MAX_RESULTS) {
+      this.log("LIMIT", `MAX_RESULTS atingido: ${this.config.MAX_RESULTS}`);
+      return false;
+    }
+
+    this.queryManager.markExecuted(query);
+    
+    for (let p = 0; p < this.config.BING_SEARCH_PAGES; p++) {
       if (this.results.size >= this.config.MAX_RESULTS) {
         this.log("LIMIT", `MAX_RESULTS atingido: ${this.config.MAX_RESULTS}`);
-        return;
+        return false;
       }
-      const lower = String(qOrig).toLowerCase();
-      const qFinal = includeSiteTelegram && !lower.includes("site:t.me") ? `site:t.me ${qOrig}` : qOrig;
-      for (let p = 0; p < this.config.BING_SEARCH_PAGES; p++) {
+
+      const first = p * 10 + 1;
+      const url = `https://www.bing.com/search?q=${encodeURIComponent(query)}&first=${first}`;
+      this.log("SEARCH", query);
+      const html = await this.fetchUrl(url);
+      if (!html) continue;
+
+      // Procura links Telegram diretos nos snippets da busca
+      const directTme = this.findTelegramLinksInHtml(html, url);
+      for (const t of directTme) {
+        if (this.results.size >= this.config.MAX_RESULTS) break;
+        this.stats.telegramLinksFound += 1;
+        this.log("TELEGRAM", `@${t.username} (direct from search: ${query})`);
+        if (!isValidTelegramUsername(t.username)) continue;
+        const meta = await this.fetchTelegramMetadata(t.username);
+        const categoria = this.classify({ nome: meta?.nome || "", descricao: meta?.descricao || "", fonte: t.fonte || url });
+        const { estado, cidade } = this.findStateCity({ nome: meta?.nome || "", descricao: meta?.descricao || "", fonte: t.fonte || url });
+        const rec = {
+          username: t.username,
+          nome: meta?.nome || "",
+          descricao: meta?.descricao || "",
+          tipo: meta?.tipo || "",
+          categoria: categoria || "",
+          estado: estado || "",
+          cidade: cidade || "",
+          fonte: t.fonte || url
+        };
+        const added = this.addResult(rec);
+        if (added) {
+          await this.saveIfNeeded();
+          
+          // NOVO: Gera novas queries a partir do resultado descoberto
+          if (meta && (meta.nome || meta.descricao)) {
+            const newQueries = this.queryManager.generateFromMetadata(
+              meta.nome,
+              meta.descricao,
+              estado,
+              cidade,
+              3
+            );
+            for (const nq of newQueries) {
+              if (this.queryManager.addQuery(nq)) {
+                this.stats.queriesGenerated += 1;
+                this.log("DISCOVER", `gerada query a partir de @${t.username}: "${nq}"`);
+              }
+            }
+          }
+        }
+
         if (this.results.size >= this.config.MAX_RESULTS) {
           this.log("LIMIT", `MAX_RESULTS atingido: ${this.config.MAX_RESULTS}`);
-          return;
+          return false;
         }
-        const first = p * 10 + 1;
-        const url = `https://www.bing.com/search?q=${encodeURIComponent(qFinal)}&first=${first}`;
-        this.log("SEARCH", qFinal);
-        const html = await this.fetchUrl(url);
-        if (!html) continue;
-        const $ = cheerio.load(html);
-        // immediate: find any direct t.me links embedded in search result snippets
-        const directTme = this.findTelegramLinksInHtml(html, url);
-        for (const t of directTme) {
-          if (this.results.size >= this.config.MAX_RESULTS) break;
-          this.stats.telegramLinksFound += 1;
-          this.log("TELEGRAM", `@${t.username} (direct from search: ${qFinal})`);
-          if (!isValidTelegramUsername(t.username)) continue;
-          const meta = await this.fetchTelegramMetadata(t.username);
-          const categoria = this.classify({ nome: meta?.nome || "", descricao: meta?.descricao || "", fonte: t.fonte || url });
-          const { estado, cidade } = this.findStateCity({ nome: meta?.nome || "", descricao: meta?.descricao || "", fonte: t.fonte || url });
-          const rec = {
-            username: t.username,
-            nome: meta?.nome || "",
-            descricao: meta?.descricao || "",
-            tipo: meta?.tipo || "",
-            categoria: categoria || "",
-            estado: estado || "",
-            cidade: cidade || "",
-            fonte: t.fonte || url
-          };
-          const added = this.addResult(rec);
-          if (added) await this.saveIfNeeded();
-          if (this.results.size >= this.config.MAX_RESULTS) {
-            this.log("LIMIT", `MAX_RESULTS atingido: ${this.config.MAX_RESULTS}`);
-            return;
-          }
-        }
-        // Enqueue search result links (but only relevant ones)
-        $("li.b_algo h2 a").each((i, el) => {
-          const href = $(el).attr("href");
-          if (href) {
-            const score = this.scoreUrlForTelegram(href, `bing:${qFinal}`);
-            this.addToQueue(href, 0, `bing:${qFinal}`, score);
-          }
-        });
-        $("a[href]").each((i, el) => {
-          const href = $(el).attr("href");
-          if (!href) return;
-          try {
-            const full = new URL(href, url).toString();
-            if (!full.includes("bing.com")) {
-              const score = this.scoreUrlForTelegram(full, `bing:${qFinal}`);
-              this.addToQueue(full, 0, `bing:${qFinal}`, score);
-            }
-          } catch {}
-        });
-        await safeSleep(this.config.REQUEST_DELAY);
       }
+
+      // Enqueue search result links para crawling
+      const $ = cheerio.load(html);
+      $("li.b_algo h2 a").each((i, el) => {
+        const href = $(el).attr("href");
+        if (href) {
+          const score = this.scoreUrlForTelegram(href, `bing:${query}`);
+          this.addToQueue(href, 0, `bing:${query}`, score);
+        }
+      });
+
+      await safeSleep(this.config.REQUEST_DELAY);
     }
+
+    return true;
   }
 
   isSourceLikelyTelegramDirectory(url) {
@@ -429,32 +457,12 @@ export class Crawler {
     const high = ["t.me", "telegram.me", "telegramchannels", "telegramgroup", "tgstat", "tlgrm", "telegramic", "canais", "canal", "grupo", "grupos", "channels", "groups"];
     for (const h of high) if (low.includes(h)) return true;
     // news/politics only if path or query contains political tokens
-    const politicalTokens = ["política", "politica", "eleição", "eleicoes", "eleições", "eleição", "eleicoes", "eleicoes", "eleja", "partido", "governo", "senado", "congresso", "prefeito", "vereador", "governador", "noticia", "notícias", "jornal", "opinião", "opiniao"];
+    const politicalTokens = ["política", "politica", "eleição", "eleicoes", "eleições", "eleja", "partido", "governo", "senado", "congresso", "prefeito", "deputado", "vereador", "câmara"];
     for (const t of politicalTokens) {
       if (low.includes(t)) return true;
     }
     // otherwise do not accept generic domains simply because they end with .com/.br/.org
     return false;
-  }
-
-  generateQueriesFromMetadata(nome, descricao, maxNew = 4) {
-    const full = `${nome}`.trim();
-    const short = (nome || descricao || "").trim().split(/\s+/).slice(0,4).join(" ").trim();
-    const queries = new Set();
-    if (full && full.length >= 6) {
-      queries.add(`"${full}" Telegram`);
-      queries.add(`"${full}" site:t.me`);
-      if (short && short.toLowerCase() !== full.toLowerCase()) {
-        queries.add(`"${short}" Telegram`);
-      }
-    } else if (short && short.length >= 4) {
-      queries.add(`"${short}" Telegram`);
-      queries.add(`"${short}" site:t.me`);
-    }
-    const text = `${nome} ${descricao}`.toLowerCase();
-    for (const s of STATES) if (text.includes(s.toLowerCase())) queries.add(`Telegram ${s}`);
-    for (const c of CITIES) if (text.includes(c.toLowerCase())) queries.add(`Telegram ${c}`);
-    return Array.from(queries).slice(0, maxNew);
   }
 
   async processQueueItem(item) {
@@ -475,7 +483,7 @@ export class Crawler {
       this.log("TELEGRAM", `@${t.username} (fonte: ${t.fonte})`);
       if (!isValidTelegramUsername(t.username)) continue;
       const meta = await this.fetchTelegramMetadata(t.username);
-      if (meta) this.log("META", `@${t.username} nome="${meta.nome}" desc="${meta.descricao ? meta.descricao.slice(0,80) : ""}"`);
+      if (meta) this.log("META", `@${t.username} nome="${meta.nome}" desc="${meta.descricao ? meta.descricao.slice(0, 80) : ""}"`);
       const categoria = this.classify({ nome: meta?.nome || "", descricao: meta?.descricao || "", fonte: t.fonte || url });
       const { estado, cidade } = this.findStateCity({ nome: meta?.nome || "", descricao: meta?.descricao || "", fonte: t.fonte || url });
       const rec = {
@@ -494,13 +502,21 @@ export class Crawler {
         this.log("LIMIT", `MAX_RESULTS atingido: ${this.config.MAX_RESULTS}`);
         return;
       }
+
+      // NOVO: Gera queries a partir de resultados descobertos
       if (meta && (meta.nome || meta.descricao)) {
-        const newQueries = this.generateQueriesFromMetadata(meta.nome, meta.descricao, 3);
+        const newQueries = this.queryManager.generateFromMetadata(
+          meta.nome,
+          meta.descricao,
+          estado,
+          cidade,
+          3
+        );
         for (const nq of newQueries) {
-          this.log("DISCOVER", `gerada query a partir de @${t.username}: "${nq}"`);
-          const searchUrl = `https://www.bing.com/search?q=${encodeURIComponent(nq)}`;
-          const score = 70;
-          this.addToQueue(searchUrl, 0, `derived:${t.username}`, score);
+          if (this.queryManager.addQuery(nq)) {
+            this.stats.queriesGenerated += 1;
+            this.log("DISCOVER", `gerada query a partir de @${t.username}: "${nq}"`);
+          }
         }
       }
     }
@@ -523,23 +539,51 @@ export class Crawler {
     }
   }
 
-  async run(initialQueries = [], initialSeeds = [], includeSiteTelegram = false) {
+  async run(initialQueries = [], initialSeeds = []) {
+    // NOVO: Adiciona queries iniciais ao QueryManager
+    const added = this.queryManager.addQueries(initialQueries);
+    this.log("INIT", `${added} queries iniciais adicionadas`);
+
+    // Seeds de URLs base
     initialSeeds.forEach((s) => {
       const score = this.scoreUrlForTelegram(s, "seed");
       this.addToQueue(s, 0, "seed", score);
     });
-    await this.seedFromSearchQueries(initialQueries, includeSiteTelegram);
-    this.log("RUN", `fila inicial: ${this.queue.length} itens`);
-    while ((this.queue.length > 0 || this.queueExecutor.pending > 0) && this.results.size < this.config.MAX_RESULTS) {
+
+    this.log("RUN", `fila inicial: ${this.queue.length} itens, queries: ${this.queryManager.count().pending}`);
+
+    // Main loop: alterna entre executar queries e processar fila de URLs
+    while (this.results.size < this.config.MAX_RESULTS) {
+      // Processa queries dinâmicas primeiro
+      while (this.queryManager.hasPending() && this.results.size < this.config.MAX_RESULTS) {
+        const query = this.queryManager.getFirst();
+        if (!query) break;
+        const continueLoop = await this.executeBingQuery(query);
+        if (!continueLoop) break;
+      }
+
+      if (this.results.size >= this.config.MAX_RESULTS) {
+        this.log("LIMIT", `MAX_RESULTS atingido: ${this.config.MAX_RESULTS}`);
+        break;
+      }
+
+      // Processa fila de URLs
       while (this.queue.length > 0 && this.queueExecutor.size + this.queueExecutor.pending < Math.max(2, this.config.CONCURRENCY * 2)) {
+        if (this.results.size >= this.config.MAX_RESULTS) break;
         const item = this.popQueue();
         if (!item) break;
         if (this.visited.has(item.url)) continue;
         this.queueExecutor.add(() => this.processQueueItem(item)).catch((e) => { this.log("QUEUE", "erro item:", e.message); });
       }
+
       await safeSleep(300);
       await this.saveIfNeeded();
+
+      if (!this.queryManager.hasPending() && this.queue.length === 0 && this.queueExecutor.pending === 0) {
+        break;
+      }
     }
+
     await this.queueExecutor.onIdle();
     await this.saveIfNeeded(true);
     const totalTime = (new Date() - this.stats.startTime) / 1000;
@@ -551,6 +595,8 @@ export class Crawler {
       resultsWithName: this.stats.resultsWithName,
       resultsWithDescription: this.stats.resultsWithDescription,
       resultsClassified: this.stats.resultsClassified,
+      queriesExecuted: this.queryManager.executedQueries.size,
+      queriesGenerated: this.stats.queriesGenerated,
       totalTimeSeconds: totalTime
     };
   }
